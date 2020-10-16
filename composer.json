@@ -1,6 +1,13 @@
 {
+    "name": "hamidgh83/sso",
     "type": "project",
     "license": "proprietary",
+    "authors": [
+        {
+            "name": "Hamid Ghorashi",
+            "email": "h.ghorashi@gmail.com"
+        }
+    ],
     "require": {
         "php": ">=7.1.3",
         "ext-ctype": "*",
@@ -8,6 +15,7 @@
         "doctrine/annotations": "^1.10",
         "friendsofsymfony/rest-bundle": "^3.0",
         "sensio/framework-extra-bundle": "^5.6",
+        "symfony/cache": "4.4.*",
         "symfony/console": "4.4.*",
         "symfony/dotenv": "4.4.*",
         "symfony/flex": "^1.3.1",
