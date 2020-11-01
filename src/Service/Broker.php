@@ -1,8 +1,8 @@
 <?php
-namespace SSO\Service;
+namespace App\Service;
 
 use Exception;
-use SSO\Exception\NotAttachedException;
+use App\Exception\NotAttachedException;
 
 /**
  * Single sign-on broker.
