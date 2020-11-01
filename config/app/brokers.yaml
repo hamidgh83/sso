@@ -1,0 +1,14 @@
+parameters:
+  brokers:
+    Alice:
+      secret: '8iwzik1bwd'
+      domains: 
+          - 'localhost'
+    Greg:
+        secret: '7pypoox2pc'
+        domains: 
+          - 'localhost'
+    Julius:
+      secret: 'ceda63kmhp'
+      domains: 
+          - 'localhost'
