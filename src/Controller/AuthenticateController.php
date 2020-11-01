@@ -2,11 +2,10 @@
 
 namespace App\Controller;
 
+use App\Exception\NotAttachedException;
+use App\Service\Broker;
 use Exception;
-use SSO\Exception\NotAttachedException;
-use SSO\Service\Broker;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
-use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Annotation\Route;
 
 class AuthenticateController extends AbstractController
