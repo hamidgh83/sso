@@ -1,0 +1,28 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Hello BrokerController!{% endblock %}
+
+{% block body %}
+<style>
+    .example-wrapper { margin: 1em auto; max-width: 800px; width: 95%; font: 18px/1.5 sans-serif; }
+    .example-wrapper code { background: #F5F5F5; padding: 2px 6px; }
+</style>
+
+<div class="example-wrapper">
+    <h1>Hello {{ controller_name }}! ✅</h1>
+    
+    <div class="container">
+        <h1>Single Sign-On demo <small>(Broker: <?= $broker->getBrokerId() ?>)</small></h1>
+
+        <?php if ($userInfo === null) : ?>
+            <h3>Logged out</h3>
+            <a id="login" class="button" href="login.php">Login</a>
+        <?php else : ?>
+            <h3>Logged in</h3>
+            <pre><?= json_encode($userInfo, JSON_PRETTY_PRINT); ?></pre>
+
+            <a id="logout" class="button" href="logout.php">Logout</a>
+        <?php endif ?>
+    </div>
+</div>
+{% endblock %}

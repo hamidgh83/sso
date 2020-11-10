@@ -1,13 +1,14 @@
 <?php
 
+declare(strict_types=1);
+
 namespace App\Service;
 
-use App\Exception\BrokerException;
-use App\Exception\ServerException;
-use Closure;
+use Jasny\Immutable;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Log\LoggerInterface;
-use Symfony\Component\Cache\Adapter\FilesystemAdapter;
+use Psr\Log\NullLogger;
+use Psr\SimpleCache\CacheInterface;
 
 /**
  * Single sign-on server.
@@ -15,27 +16,17 @@ use Symfony\Component\Cache\Adapter\FilesystemAdapter;
  */
 class Server
 {
-    /**
-     * @var array
-     */
-    protected $options = ['files_cache_directory' => '/tmp', 'files_cache_ttl' => 36000];
+    use Immutable\With;
 
     /**
      * Callback to get the secret for a broker.
-     * @var Closure
+     * @var \Closure
      */
     protected $getBrokerInfo;
 
     /**
-     * Service to interact with sessions.
-     * @var SessionInterface
-     */
-    protected $session;
-
-    /**
-     * Cache that stores the special session data for the brokers.
-     *
-     * @var AdapterInterface
+     * Storage for broker session links.
+     * @var CacheInterface
      */
     protected $cache;
 
@@ -44,23 +35,47 @@ class Server
      */
     protected $logger;
 
-    public function __construct(callable $getBrokerInfo, LoggerInterface $logger)
+    /**
+     * Service to interact with sessions.
+     * @var SessionInterface
+     */
+    protected $session;
+
+    /**
+     * Class constructor.
+     *
+     * @phpstan-param callable(string):?array{secret:string,domains:string[]} $getBrokerInfo
+     * @phpstan-param CacheInterface                                          $cache
+     */
+    public function __construct(callable $getBrokerInfo, CacheInterface $cache)
     {
-        $this->cache         = $this->createCacheAdapter();
-        $this->getBrokerInfo = Closure::fromCallable($getBrokerInfo);
-        $this->logger        = $logger;
-        $this->session       = new GlobalSession;
+        $this->getBrokerInfo = \Closure::fromCallable($getBrokerInfo);
+        $this->cache = $cache;
+
+        $this->logger = new NullLogger();
+        $this->session = new GlobalSession();
     }
 
     /**
-     * Create a cache to store the broker session id.
+     * Get a copy of the service with logging.
      *
-     * @return AdapterInterface
+     * @return static
      */
-    protected function createCacheAdapter()
+    public function withLogger(LoggerInterface $logger): self
     {
-        return new FilesystemAdapter('sso', $this->options['files_cache_ttl'], $this->options['files_cache_directory']);
+        return $this->withProperty('logger', $logger);
     }
+
+    /**
+     * Get a copy of the service with a custom session service.
+     *
+     * @return static
+     */
+    public function withSession(SessionInterface $session): self
+    {
+        return $this->withProperty('session', $session);
+    }
+
 
     /**
      * Start the session for broker requests to the SSO server.
@@ -71,7 +86,7 @@ class Server
     public function startBrokerSession(?ServerRequestInterface $request = null): void
     {
         if ($this->session->isActive()) {
-            throw new ServerException("Session is already started", 500);
+            throw new \RuntimeException("Session is already started", 500);
         }
 
         $bearer = $this->getBearerToken($request);
@@ -85,7 +100,7 @@ class Server
                 "Bearer token isn't attached to a client session",
                 ['broker' => $brokerId, 'token' => $token]
             );
-            throw new BrokerException("Bearer token isn't attached to a client session", 403);
+            throw new \RuntimeException("Bearer token isn't attached to a client session", 403);
         }
 
         $code = $this->getVerificationCode($brokerId, $token, $sessionId);
@@ -113,7 +128,7 @@ class Server
         if ($type !== 'Bearer') {
             $this->logger->warning("Broker didn't use bearer authentication: "
                 . ($authorization === '' ? "No 'Authorization' header" : "$type authorization used"));
-            throw new BrokerException("Broker didn't use bearer authentication", 401);
+            throw new \RuntimeException("Broker didn't use bearer authentication", 401);
         }
 
         return $token;
@@ -131,7 +146,7 @@ class Server
 
         if (!(bool)preg_match('/^SSO-(\w*+)-(\w*+)-([a-z0-9]*+)$/', $bearer, $matches)) {
             $this->logger->warning("Invalid bearer token", ['bearer' => $bearer]);
-            throw new BrokerException("Invalid bearer token", 403);
+            throw new \RuntimeException("Invalid bearer token", 403);
         }
 
         return array_slice($matches, 1);
@@ -173,7 +188,7 @@ class Server
 
         if ($secret === null) {
             $this->logger->warning("Unknown broker", ['broker' => $brokerId, 'token' => $token]);
-            throw new BrokerException("Broker is unknown or disabled", 403);
+            throw new \RuntimeException("Broker is unknown or disabled", 403);
         }
 
         return base_convert(hash_hmac('sha256', $command . ':' . $token, $secret), 16, 36);
@@ -193,14 +208,14 @@ class Server
     ): void {
         $expected = $this->generateChecksum($command . ($code !== null ? ":$code" : ''), $brokerId, $token);
 
-        // if ($checksum !== $expected) {
-        //     $this->logger->warning(
-        //         "Invalid $command checksum",
-        //         ['expected' => $expected, 'received' => $checksum, 'broker' => $brokerId, 'token' => $token]
-        //             + ($code !== null ? ['verification_code' => $code] : [])
-        //     );
-        //     throw new BrokerException("Invalid $command checksum", 403);
-        // }
+        if ($checksum !== $expected) {
+            $this->logger->warning(
+                "Invalid $command checksum",
+                ['expected' => $expected, 'received' => $checksum, 'broker' => $brokerId, 'token' => $token]
+                    + ($code !== null ? ['verification_code' => $code] : [])
+            );
+            throw new \RuntimeException("Invalid $command checksum", 403);
+        }
     }
 
     /**
@@ -216,7 +231,7 @@ class Server
                 "Domain of $type is not allowed for broker",
                 [$type => $url, 'broker' => $brokerId] + ($token !== null ? ['token' => $token] : [])
             );
-            throw new BrokerException("Domain of $type is not allowed", 400);
+            throw new \RuntimeException("Domain of $type is not allowed", 400);
         }
     }
 
@@ -230,7 +245,7 @@ class Server
     public function attach(?ServerRequestInterface $request = null): string
     {
         ['broker' => $brokerId, 'token' => $token] = $this->processAttachRequest($request);
-
+        
         $this->session->start();
 
         $this->assertNotAttached($brokerId, $token);
@@ -242,7 +257,7 @@ class Server
 
         if (!$cached) {
             $this->logger->error("Failed to attach bearer token to session id due to cache issue", $info);
-            throw new ServerException("Failed to attach bearer token to session id", 500);
+            throw new \RuntimeException("Failed to attach bearer token to session id", 500);
         }
 
         $this->logger->info("Attached broker token to session", $info);
@@ -256,7 +271,7 @@ class Server
     protected function assertNotAttached(string $brokerId, string $token): void
     {
         $key = $this->getCacheKey($brokerId, $token);
-        $attached = $this->cache->getItem($key);
+        $attached = $this->cache->get($key);
 
         if ($attached !== null && $attached !== $this->session->getId()) {
             $this->logger->warning("Token is already attached", [
@@ -265,7 +280,7 @@ class Server
                 'attached_to' => $attached,
                 'session' => $this->session->getId()
             ]);
-            throw new BrokerException("Token is already attached", 400);
+            throw new \RuntimeException("Token is already attached", 400);
         }
     }
 
@@ -324,7 +339,7 @@ class Server
         $value = $this->getQueryParam($request, $key);
 
         if ($value === null) {
-            throw new BrokerException("Missing '$key' query parameter", 400);
+            throw new \RuntimeException("Missing '$key' query parameter", 400);
         }
 
         return $value;
