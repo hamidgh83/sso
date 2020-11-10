@@ -3,7 +3,7 @@ parameters:
         jackie:
             fullname: 'Jackie Black'
             email: 'jackie.black@example.com'
-            password: '$2y$10$lVUeiphXLAm4pz6l7lF9i.6IelAqRxV4gCBu8GBGhCpaRb6o0qzUO'
+            password: '$2y$10$lVUeiphXLAm4pz6l7lF9i.6IelAqRxV4gCBu8GBGhCpaRb6o0qzUO' # jackie123
         john:
             fullname: 'John Doe'
             email: 'john.doe@example.com'

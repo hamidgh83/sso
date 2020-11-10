@@ -2,31 +2,38 @@
 
 namespace App\Controller;
 
-use App\Exception\BrokerException;
 use FOS\RestBundle\Controller\AbstractFOSRestController;
-use FOS\RestBundle\Controller\Annotations as Rest;
+use FOS\RestBundle\Controller\Annotations\Route;
 use App\Service\Server;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\Request;
-use Symfony\Component\HttpFoundation\Response;
-use Symfony\Component\HttpKernel\Exception\HttpException;
+use Desarrolla2\Cache\File as FileCache;
+use Loggy;
+use App\Service\ExceptionInterface as SSOException;
 
 class AttachController extends AbstractFOSRestController
 {
     /**
-     * @Rest\Get("/attach", name="attach")
+     * @Route("/attach", name="attach")
      */
     public function index(Request $request, LoggerInterface $logger)
     {
         $brokers = $this->getParameter("brokers");
-        $server  = new Server(function (string $id) use ($brokers) {
-            return $brokers[$id];  // Callback to get the broker secret. You might fetch this from DB.
-        }, $logger);
+        // Instantiate the SSO server.
+        $ssoServer = (new Server(
+            function (string $id) use ($brokers) {
+                return $brokers[$id] ?? null;  // Callback to get the broker secret. You might fetch this from DB.
+            },
+            new FileCache(sys_get_temp_dir())            // Any PSR-16 compatible cache
+        ))->withLogger(new Loggy('SSO'));
 
         try {
-            $verificationCode = $server->attach();
-        } catch (BrokerException $e) {
-            throw new HttpException(Response::HTTP_NOT_ACCEPTABLE, $e->getMessage());
+            // Attach the broker token to the user session. Uses query parameters from $_GET.
+            $verificationCode = $ssoServer->attach();
+            $error = null;
+        } catch (SSOException $exception) {
+            $verificationCode = null;
+            $error = ['code' => $exception->getCode(), 'message' => $exception->getMessage()];
         }
 
         $returnType =
@@ -35,7 +42,7 @@ class AttachController extends AbstractFOSRestController
             (strpos($_SERVER['HTTP_ACCEPT'], 'text/html') !== false ? 'html' : null) ??
             (strpos($_SERVER['HTTP_ACCEPT'], 'application/json') !== false ? 'json' : null);
 
-        /* switch ($returnType) {
+        switch ($returnType) {
             case 'json':
                 header('Content-type: application/json');
                 http_response_code($error['code'] ?? 200);
@@ -52,16 +59,15 @@ class AttachController extends AbstractFOSRestController
             case 'redirect':
                 $query = isset($error) ? 'sso_error=' . $error['message'] : 'sso_verify=' . $verificationCode;
                 $url = $_GET['return_url'] . (strpos($_GET['return_url'], '?') === false ? '?' : '&') . $query;
-                header('Location: ' . $url, true, 303);
-                echo "You're being redirected to <a href='{$url}'>$url</a>";
-                break;
+                
+                return $this->redirect($url);
 
             default:
                 http_response_code(400);
                 header('Content-Type: text/plain');
                 echo "Missing 'return_url' query parameter";
                 break;
-        } */
+        }
 
         return $this->view(['verificationCode' => $verificationCode], 200);
     }

@@ -1,8 +1,11 @@
 <?php
+
+declare(strict_types=1);
+
 namespace App\Service;
 
-use Exception;
-use App\Exception\NotAttachedException;
+use Jasny\Immutable;
+use RuntimeException;
 
 /**
  * Single sign-on broker.
@@ -12,8 +15,10 @@ use App\Exception\NotAttachedException;
  */
 class Broker
 {
+    use Immutable\With;
+
     /**
-     * Url of SSO server
+     * URL of SSO server.
      * @var string
      */
     protected $url;
@@ -22,7 +27,7 @@ class Broker
      * My identifier, given by SSO provider.
      * @var string
      */
-    public $broker;
+    protected $broker;
 
     /**
      * My secret word, given by SSO provider.
@@ -31,266 +36,316 @@ class Broker
     protected $secret;
 
     /**
-     * Session token of the client
-     * @var string
+     * @var bool
      */
-    public $token;
+    protected $initialized = false;
 
     /**
-     * User info recieved from the server.
-     * @var array
+     * Session token of the client.
+     * @var string|null
      */
-    protected $userinfo;
+    protected $token;
 
     /**
-     * Cookie lifetime
-     * @var int
+     * Verification code returned by the server.
+     * @var string|null
      */
-    protected $cookie_lifetime;
+    protected $verificationCode;
+
+    /**
+     * @var \ArrayAccess<string,mixed>
+     */
+    protected $state;
+
+    /**
+     * @var Curl
+     */
+    protected $curl;
 
     /**
      * Class constructor
      *
-     * @param string $url    Url of SSO server
-     * @param string $broker My identifier, given by SSO provider.
-     * @param string $secret My secret word, given by SSO provider.
+     * @param string $url     Url of SSO server
+     * @param string $broker  My identifier, given by SSO provider.
+     * @param string $secret  My secret word, given by SSO provider.
      */
-    public function __construct($url, $broker, $secret, $cookie_lifetime = 3600)
+    public function __construct(string $url, string $broker, string $secret)
     {
-        if (!$url) throw new \InvalidArgumentException("SSO server URL not specified");
-        if (!$broker) throw new \InvalidArgumentException("SSO broker id not specified");
-        if (!$secret) throw new \InvalidArgumentException("SSO broker secret not specified");
+        if (!(bool)preg_match('~^https?://~', $url)) {
+            throw new \InvalidArgumentException("Invalid SSO server URL '$url'");
+        }
+
+        if ((bool)preg_match('/\W/', $broker)) {
+            throw new \InvalidArgumentException("Invalid broker id '$broker': must be alphanumeric");
+        }
 
         $this->url = $url;
         $this->broker = $broker;
         $this->secret = $secret;
-        $this->cookie_lifetime = $cookie_lifetime;
 
-        if (isset($_COOKIE[$this->getCookieName()])) $this->token = $_COOKIE[$this->getCookieName()];
+        $this->state = new Cookies();
+    }
+
+    /**
+     * Get a copy with a different handler for the user state (like cookie or session).
+     *
+     * @param \ArrayAccess<string,mixed> $handler
+     * @return static
+     */
+    public function withTokenIn(\ArrayAccess $handler): self
+    {
+        return $this->withProperty('state', $handler);
+    }
+
+    /**
+     * Set a custom wrapper for cURL.
+     *
+     * @param Curl $curl
+     * @return static
+     */
+    public function withCurl(Curl $curl): self
+    {
+        return $this->withProperty('curl', $curl);
+    }
+
+    /**
+     * Get Wrapped cURL.
+     */
+    protected function getCurl(): Curl
+    {
+        if (!isset($this->curl)) {
+            $this->curl = new Curl(); // @codeCoverageIgnore
+        }
+
+        return $this->curl;
+    }
+
+    /**
+     * Get the broker identifier.
+     */
+    public function getBrokerId(): string
+    {
+        return $this->broker;
+    }
+
+    /**
+     * Get information from cookie.
+     */
+    protected function initialize(): void
+    {
+        if ($this->initialized) {
+            return;
+        }
+
+        $this->token = $this->state[$this->getCookieName('token')] ?? null;
+        $this->verificationCode = $this->state[$this->getCookieName('verify')] ?? null;
+        $this->initialized = true;
+    }
+
+    /**
+     * @return string|null
+     */
+    protected function getToken(): ?string
+    {
+        $this->initialize();
+
+        return $this->token;
+    }
+
+    /**
+     * @return string|null
+     */
+    protected function getVerificationCode(): ?string
+    {
+        $this->initialize();
+
+        return $this->verificationCode;
     }
 
     /**
      * Get the cookie name.
-     *
-     * Note: Using the broker name in the cookie name.
-     * This resolves issues when multiple brokers are on the same domain.
-     *
-     * @return string
+     * The broker name is part of the cookie name. This resolves issues when multiple brokers are on the same domain.
      */
-    protected function getCookieName()
+    protected function getCookieName(string $type): string
     {
-        return 'sso_token_' . preg_replace('/[_\W]+/', '_', strtolower($this->broker));
+        $brokerName = preg_replace('/[_\W]+/', '_', strtolower($this->broker));
+
+        return "sso_{$type}_{$brokerName}";
     }
 
     /**
      * Generate session id from session key
      *
-     * @return string
+     * @throws NotAttachedException
      */
-    protected function getSessionId()
+    public function getBearerToken(): string
     {
-        if (!isset($this->token)) return null;
+        $token = $this->getToken();
+        $verificationCode = $this->getVerificationCode();
 
-        $checksum = hash('sha256', 'session' . $this->token . $this->secret);
-        return "SSO-{$this->broker}-{$this->token}-$checksum";
+        if ($verificationCode === null) {
+            throw new \RuntimeException("The client isn't attached to the SSO server for this broker. "
+                . "Make sure that the '" . $this->getCookieName('verify') . "' cookie is set.");
+        }
+
+        return "SSO-{$this->broker}-{$token}-" . $this->generateChecksum("bearer:$verificationCode");
     }
 
     /**
-     * Generate session token
+     * Generate session token.
      */
-    public function generateToken()
+    protected function generateToken(): void
     {
-        if (isset($this->token)) return;
-
-        $this->token = base_convert(md5(uniqid(rand(), true)), 16, 36);
-        setcookie($this->getCookieName(), $this->token, time() + $this->cookie_lifetime, '/');
+        $this->token = base_convert(bin2hex(random_bytes(32)), 16, 36);
+        $this->state[$this->getCookieName('token')] = $this->token;
     }
 
     /**
-     * Clears session token
+     * Clears session token.
      */
-    public function clearToken()
+    public function clearToken(): void
     {
-        setcookie($this->getCookieName(), null, 1, '/');
+        unset($this->state[$this->getCookieName('token')]);
+        unset($this->state[$this->getCookieName('verify')]);
+
         $this->token = null;
+        $this->verificationCode = null;
     }
 
     /**
      * Check if we have an SSO token.
-     *
-     * @return boolean
      */
-    public function isAttached()
+    public function isAttached(): bool
     {
-        return isset($this->token);
+        return $this->getVerificationCode() !== null;
     }
 
     /**
      * Get URL to attach session at SSO server.
      *
-     * @param array $params
+     * @param array<string,mixed> $params
      * @return string
      */
-    public function getAttachUrl($params = [])
+    public function getAttachUrl(array $params = []): string
     {
-        $this->generateToken();
+        if ($this->getToken() === null) {
+            $this->generateToken();
+        }
 
         $data = [
-            'command' => 'attach',
             'broker' => $this->broker,
-            'token' => $this->token,
-            'checksum' => hash('sha256', 'attach' . $this->token . $this->secret)
-        ] + $_GET;
+            'token' => $this->getToken(),
+            'checksum' => $this->generateChecksum('attach')
+        ];
 
         return $this->url . "?" . http_build_query($data + $params);
     }
 
     /**
-     * Attach our session to the user's session on the SSO server.
-     *
-     * @param string|true $returnUrl  The URL the client should be returned to after attaching
+     * Verify attaching to the SSO server by providing the verification code.
      */
-    public function attach($returnUrl = null)
+    public function verify(string $code): void
     {
-        if ($this->isAttached()) return;
+        $this->initialize();
 
-        if ($returnUrl === true) {
-            $protocol = !empty($_SERVER['HTTPS']) ? 'https://' : 'http://';
-            $returnUrl = $protocol . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI'];
+        if ($this->verificationCode === $code) {
+            return;
         }
 
-        $params = ['return_url' => $returnUrl];
-        $url = $this->getAttachUrl($params);
+        if ($this->verificationCode !== null) {
+            trigger_error("SSO attach already verified", E_USER_WARNING);
+            return;
+        }
 
-        header("Location: $url", true, 307);
-        echo "You're redirected to <a href='$url'>$url</a>";
-        exit();
+        $this->verificationCode = $code;
+        $this->state[$this->getCookieName('verify')] = $code;
+    }
+
+    /**
+     * Generate checksum for a broker.
+     */
+    protected function generateChecksum(string $command): string
+    {
+        return base_convert(hash_hmac('sha256', $command . ':' . $this->token, $this->secret), 16, 36);
     }
 
     /**
      * Get the request url for a command
      *
-     * @param string $command
-     * @param array  $params   Query parameters
+     * @param string                     $path
+     * @param array<string,mixed>|string $params   Query parameters
      * @return string
      */
-    protected function getRequestUrl($command, $params = [])
+    protected function getRequestUrl(string $path, $params = ''): string
     {
-        $params['command'] = $command;
-        return $this->url . '?' . http_build_query($params);
+        $query = is_array($params) ? http_build_query($params) : $params;
+
+        $base = $path[0] === '/'
+            ? preg_replace('~^(\w+://[^/]+).*~', '$1', $this->url)
+            : preg_replace('~/[^/]*$~', '', $this->url);
+
+        return $base . '/' . ltrim($path, '/') . ($query !== '' ? '?' . $query : '');
+    }
+
+
+    /**
+     * Send an HTTP request to the SSO server.
+     *
+     * @param string                     $method  HTTP method: 'GET', 'POST', 'DELETE'
+     * @param string                     $path    Relative path
+     * @param array<string,mixed>|string $data    Query or post parameters
+     * @return mixed
+     * @throws RequestException
+     */
+    public function request(string $method, string $path, $data = '')
+    {
+        $url = $this->getRequestUrl($path, $method === 'POST' ? '' : $data);
+        $headers = [
+            'Accept: application/json',
+            'Authorization: Bearer ' . $this->getBearerToken()
+        ];
+
+        ['httpCode' => $httpCode, 'contentType' => $contentType, 'body' => $body] =
+            $this->getCurl()->request($method, $url, $headers, $method === 'POST' ? $data : '');
+        
+        return $this->handleResponse($httpCode, $contentType, $body);
     }
 
     /**
-     * Execute on SSO server.
+     * Handle the response of the cURL request.
      *
-     * @param string       $method  HTTP method: 'GET', 'POST', 'DELETE'
-     * @param string       $command Command
-     * @param array|string $data    Query or post parameters
-     * @return array|object
+     * @param int    $httpCode  HTTP status code
+     * @param string $ctHeader  Content-Type header
+     * @param string $body      Response body
+     * @return mixed
+     * @throws RequestException
      */
-    protected function request($method, $command, $data = null)
+    protected function handleResponse(int $httpCode, string $ctHeader, string $body)
     {
-        if (!$this->isAttached()) {
-            throw new NotAttachedException('No token');
-        }
-        $url = $this->getRequestUrl($command, !$data || $method === 'POST' ? [] : $data);
-
-        $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Accept: application/json', 'Authorization: Bearer '. $this->getSessionID()]);
-
-        if ($method === 'POST' && !empty($data)) {
-            $post = is_string($data) ? $data : http_build_query($data);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, $post);
+        if ($httpCode === 204) {
+            return null;
         }
 
-        $response = curl_exec($ch);
-        if (curl_errno($ch) != 0) {
-            $message = 'Server request failed: ' . curl_error($ch);
-            throw new Exception($message);
-        }
-
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        list($contentType) = explode(';', curl_getinfo($ch, CURLINFO_CONTENT_TYPE));
+        [$contentType] = explode(';', $ctHeader, 2);
 
         if ($contentType != 'application/json') {
-            $message = 'Expected application/json response, got ' . $contentType;
-            throw new Exception($message);
+            throw new \RuntimeException(
+                "Expected 'application/json' response, got '$contentType'",
+                500,
+                new \RuntimeException($body, $httpCode)
+            );
         }
 
-        $data = json_decode($response, true);
-        if ($httpCode == 403) {
-            $this->clearToken();
-            throw new NotAttachedException($data['error'] ?: $response, $httpCode);
+        try {
+            $data = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $exception) {
+            throw new \RuntimeException("Invalid JSON response from server", 500, $exception);
         }
-        if ($httpCode >= 400) throw new Exception($data['error'] ?: $response, $httpCode);
+
+        if ($httpCode >= 400) {
+            throw new \RuntimeException($data['error'] ?? $body, $httpCode);
+        }
 
         return $data;
-    }
-
-
-    /**
-     * Log the client in at the SSO server.
-     *
-     * Only brokers marked trused can collect and send the user's credentials. Other brokers should omit $username and
-     * $password.
-     *
-     * @param string $username
-     * @param string $password
-     * @return array  user info
-     * @throws Exception if login fails eg due to incorrect credentials
-     */
-    public function login($username = null, $password = null)
-    {
-        if (!isset($username) && isset($_POST['username'])) $username = $_POST['username'];
-        if (!isset($password) && isset($_POST['password'])) $password = $_POST['password'];
-
-        $result = $this->request('POST', 'login', compact('username', 'password'));
-        $this->userinfo = $result;
-
-        return $this->userinfo;
-    }
-
-    /**
-     * Logout at sso server.
-     */
-    public function logout()
-    {
-        $this->request('POST', 'logout', 'logout');
-    }
-
-    /**
-     * Get user information.
-     *
-     * @return object|null
-     */
-    public function getUserInfo()
-    {
-        if (!isset($this->userinfo)) {
-            $this->userinfo = $this->request('GET', 'userInfo');
-        }
-
-        return $this->userinfo;
-    }
-
-    /**
-     * Magic method to do arbitrary request
-     *
-     * @param string $fn
-     * @param array  $args
-     * @return mixed
-     */
-    public function __call($fn, $args)
-    {
-        $sentence = strtolower(preg_replace('/([a-z0-9])([A-Z])/', '$1 $2', $fn));
-        $parts = explode(' ', $sentence);
-
-        $method = count($parts) > 1 && in_array(strtoupper($parts[0]), ['GET', 'DELETE'])
-            ? strtoupper(array_shift($parts))
-            : 'POST';
-        $command = join('-', $parts);
-
-        return $this->request($method, $command, $args);
     }
 }
